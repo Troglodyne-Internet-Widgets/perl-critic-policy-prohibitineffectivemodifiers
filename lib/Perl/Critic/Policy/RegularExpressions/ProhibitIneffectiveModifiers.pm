@@ -168,7 +168,12 @@ sub violates {
         o => !$interpolates,
     );
 
-    return map { $self->violation( $DESC{$_}, $EXPL, $elem ) } grep { $written{$_} && $ineffective{$_} } sort keys %DESC;
+    my @reported = grep { $written{$_} && $ineffective{$_} } sort keys %DESC;
+    my @violations;
+    foreach my $modifier (@reported) {
+        push @violations, $self->violation( $DESC{$modifier}, $EXPL, $elem );
+    }
+    return @violations;
 }
 
 # Whether the pattern can match at most once: anchored at the start, or at an
@@ -201,16 +206,19 @@ sub _is_start {
 sub _consumes {
     my ( $parts, $matches ) = @_;
 
-    my @parts = @$parts;
-    foreach my $at ( 0 .. $#parts ) {
-        next if _may_repeat_zero( $parts[ $at + 1 ] );
-        my $part = $parts[$at];
-        if ( $part->isa('PPIx::Regexp::Structure::Capture') || $part->isa('PPIx::Regexp::Structure::Modifier') ) {
-            my @inner = _significant( $part->children );
-            return 1 if !_alternates(@inner) && _consumes( \@inner, $matches );
-            next;
+    my @pending = ($parts);
+    while ( my $level = shift @pending ) {
+        my @parts = @$level;
+        foreach my $at ( 0 .. $#parts ) {
+            next if _may_repeat_zero( $parts[ $at + 1 ] );
+            my $part = $parts[$at];
+            if ( $part->isa('PPIx::Regexp::Structure::Capture') || $part->isa('PPIx::Regexp::Structure::Modifier') ) {
+                my @inner = _significant( $part->children );
+                push @pending, \@inner if !_alternates(@inner);
+                next;
+            }
+            return 1 if $matches->($part);
         }
-        return 1 if $matches->($part);
     }
     return;
 }
@@ -250,7 +258,12 @@ sub _is_caseless {
     my ($re) = @_;
 
     foreach my $range ( @{ $re->find('PPIx::Regexp::Node::Range') || [] } ) {
-        my ( $from, $to ) = map { $_->ordinal } grep { $_->isa('PPIx::Regexp::Token::Literal') } $range->children;
+        my @literals = grep { $_->isa('PPIx::Regexp::Token::Literal') } $range->children;
+        my @bounds;
+        foreach my $literal (@literals) {
+            push @bounds, $literal->ordinal;
+        }
+        my ( $from, $to ) = @bounds;
         return if !defined $from || !defined $to || $to - $from >= $RANGE_LIMIT;
         return unless _all_caseless( $from .. $to );
     }
@@ -280,14 +293,20 @@ sub _all_caseless {
 sub _has_line_anchor {
     my ($re) = @_;
 
-    return any { $_->content eq '^' || $_->content eq '$' } @{ $re->find('PPIx::Regexp::Token::Assertion') || [] };
+    foreach my $assertion ( @{ $re->find('PPIx::Regexp::Token::Assertion') || [] } ) {
+        return 1 if $assertion->content eq '^' || $assertion->content eq '$';
+    }
+    return;
 }
 
 # Whether @parts holds an alternation at its own level.
 sub _alternates {
     my (@parts) = @_;
 
-    return any { $_->isa('PPIx::Regexp::Token::Operator') && $_->content eq '|' } @parts;
+    foreach my $part (@parts) {
+        return 1 if $part->isa('PPIx::Regexp::Token::Operator') && $part->content eq '|';
+    }
+    return;
 }
 
 # The parts of a pattern that match something: whitespace and comments under
